@@ -1,4 +1,4 @@
-Needed asimple rule based way to submit rollup jobs to druid. This works by using datasource segment counts from metadata and comparing them against s set of rules. If segment counts are higher than a rule for its timeframe and granularity and an index_parallel task is not already running for the datasource/interval combo than a job will be submitted.<br />
+Needed a simple rule based way to submit rollup jobs to druid. This works by using datasource segment counts from metadata and comparing them against a set of rules. If segment counts are higher than a rule allows for in its timeframe and granularity and an index_parallel task is not already running for the datasource/interval combo than a job will be submitted.<br />
 <br />
 cd to Bash and run EnvironmentSetup.sh<br />
 <br />
