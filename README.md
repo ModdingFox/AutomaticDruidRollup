@@ -1,4 +1,4 @@
-Needed a simple rule based was to submit rollups to druid.
+Needed a simple rule based way to submit rollups to druid.
 
 cd to Bash and run EnvironmentSetup.sh
 
