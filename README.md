@@ -1,7 +1,7 @@
-Needed a simple rule based way to submit rollups to druid.
-
-cd to Bash and run EnvironmentSetup.sh
-
+Needed asimple rule based way to submit rollup jobs to druid. This works by using datasource segment counts from metadata and comparing them against s set of rules. If segment counts are higher than a rule for its timeframe and granularity and an index_parallel task is not already running for the datasource/interval combo than a job will be submitted.<br />
+<br />
+cd to Bash and run EnvironmentSetup.sh<br />
+<br />
 Environments are selected from a json file with the structure below. Each environment has a name, zookeeper quorum, and root path used for node discovery.<br />
 [Environment/druidEnvironment.json]<br />
 {<br />
@@ -33,6 +33,7 @@ Rollup rules are defined in the below file. Rules are evaluated in top down orde
 &nbsp;&nbsp;"segmentGranularity": "DAY",<br />
 &nbsp;&nbsp;"queryGranularity": "DAY"<br />
 &nbsp;}<br />
-]
-
+]<br />
+<br />
+After running EnvironmentSetup.sh, creating Environment/druidEnvironment.json, and creating Environment/druidRollUpRules.json run /Bash/installSystemdService.sh and provide the environment name. Default systemd timer is every 6 horus.
 
