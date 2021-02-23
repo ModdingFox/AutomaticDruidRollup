@@ -2,7 +2,7 @@ Needed a simple rule based was to submit rollups to druid.
 
 cd to Bash and run EnvironmentSetup.sh
 
-Environments are selected from a json file with the structuce below. Each environment has a name, zookeeper quorum, and root path used for node discovery.
+Environments are selected from a json file with the structure below. Each environment has a name, zookeeper quorum, and root path used for node discovery.
 [Environment/druidEnvironment.json]
 {
     "MyProdDruid": {
