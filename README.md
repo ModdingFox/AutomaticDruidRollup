@@ -2,21 +2,22 @@ Needed a simple rule based way to submit rollup jobs to druid. This works by usi
 <br />
 cd to Bash and run EnvironmentSetup.sh<br />
 <br />
-Environments are selected from a json file with the structure below. Each environment has a name, zookeeper quorum, and root path used for node discovery.<br />
+Environments are selected from a json file with the structure below. Each environment has a name, zookeeper quorum, and root paths used for node discovery and rule storage.<br />
 [Environment/druidEnvironment.json]<br />
 {<br />
 &nbsp;"MyProdDruid": {<br />
 &nbsp;&nbsp;"Zookeeper": [ "192.168.1.100:2181", "192.168.1.101:2181", "192.168.1.102:2181" ],<br />
 &nbsp;&nbsp;"RootZNode": "/druid/discovery"<br />
+&nbsp;&nbsp;"ConfigRootZNode": "/druidRollUpRules"<br />
 &nbsp;},<br />
 &nbsp;"MyDevDruid": {<br />
 &nbsp;&nbsp;"Zookeeper": [ "192.168.0.100:2181" ],<br />
 &nbsp;&nbsp;"RootZNode": "/druid/discovery"<br />
+&nbsp;&nbsp;"ConfigRootZNode": "/druidRollUpRules"<br />
 &nbsp;}<br />
 }<br />
 <br />
-Rollup rules are defined in the below file. Rules are evaluated in top down order for dataSource intervals and will apply the rule to the first match for any given intreval to be processed.<br />
-[Environment/druidRollUpRules.json]<br />
+Rollup rules are defined in zookeeper named for their dataSource. DataSource specific rules override the _default rule. Rules are evaluated in top down order for dataSource intervals and will apply the rule to the first match for any given intreval to be processed.<br />
 [<br />
 &nbsp;{<br />
 &nbsp;&nbsp;"Period": "P7D",<br />
