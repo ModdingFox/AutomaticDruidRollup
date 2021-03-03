@@ -5,6 +5,8 @@ import json
 import getDruidEnvironment
 import Find_Druid
 import Fetch_Druid_Rules
+from kazoo.client import KazooClient
+from kazoo.exceptions import NodeExistsError
 import requests
 import re
 import datetime
@@ -19,7 +21,7 @@ configRootZNode = None;
 
 druidRouters = None;
 
-validGranularities = { "NONE": None, "SECOND": 86400, "MINUTE": 1440, "FIVE_MINUTE": 240, "TEN_MINUTE": 144, "FIFTEEN_MINUTE": 96, "THIRTY_MINUTE": 48, "HOUR": 24, "SIX_HOUR": 4, "DAY": 1};
+validGranularities = { "NONE": None, "SECOND": 86400, "MINUTE": 1440, "FIFTEEN_MINUTE": 96, "THIRTY_MINUTE": 48, "HOUR": 24, "DAY": 1};
 
 rules = {};
 
@@ -192,11 +194,23 @@ def validateRollupRules(dataSource, rules, validGranularities):
 Load_EnvVars();
 Load_Agrs();
 
+zk = KazooClient(hosts=zookeeper);
+zk.start();
+try:
+    zk.create("/druidAutoRollupCoordinator", acl=None, ephemeral=True, sequence=False, makepath=False);
+except NodeExistsError:
+    print("Another node is already the leader stopping now");
+    zk.stop();
+    exit(0);
+
+print("Got leadership running tasks now");
+
 for rule in rules.keys():
     validateRollupRules(rule, rules[rule], validGranularities);
 
 supervisors = submitGetToDruid(druidRouters.split(','), "/druid/indexer/v1/supervisor?full");
 if supervisors is False:
+    zk.stop();
     exit(-1);
 
 supervisors = json.loads(supervisors);
@@ -222,11 +236,13 @@ for supervisor in supervisors:
 
 if len(supervisorSpecInfo.keys()) <= 0:
     print("No running supervisors found");
+    zk.stop();
     exit(0);
 
 tasks = submitGetToDruid(druidRouters.split(','), "/druid/indexer/v1/tasks?type=index_parallel");
 
 if tasks is False:
+    zk.stop();
     exit(-1);
 
 tasks = json.loads(tasks);
@@ -239,12 +255,14 @@ for task in tasks:
             taskInfo[task["id"]] = {};
     else:
         print("A Task is missing a status or id failing as we have somehow got unreliable info: {0}".format(task));
+        zk.stop();
         exit(-1);
 
 for task in taskInfo.keys():
     taskPayload = submitGetToDruid(druidRouters.split(','), "/druid/indexer/v1/task/{0}".format(task));
     if taskPayload is False:
         print("Could not verify task info");
+        zk.stop();
         exit(-1);
     taskPayload = json.loads(taskPayload);
     if "payload" in taskPayload.keys() and "spec" in taskPayload["payload"].keys():
@@ -256,15 +274,18 @@ for task in taskInfo.keys():
                     runningIntervalList[payloadSpec["dataSchema"]["dataSource"]].append(payloadSpec["ioConfig"]["inputSource"]["interval"]);
                 else:
                     print("Detected a task with mismatched intervals");
+                    zk.stop();
                     exit(-1);
         else:
             print("Task payload with missing data found");
+            zk.stop();
             exit(-1);
     else:
         print("Task payload with missing data found");
+        zk.stop();
         exit(-1);
 
-#Rules are evaluated top down and execute based on first match for each interval. The rules uses the segmentGranularity to determine if a rollup should be ran for each day in the interval its checking.
+#Rules are evaluated top down and execute based on first match for each interval. The rules uses the segmentGranularity to determine if a rollup should be ran for each day in the interval its checking. Valid segmentGranularity options are NONE, SECOND, MINUTE, FIFTEEN_MINUTE, THIRTY_MINUTE, HOUR, DAY. This limits the ability to roll data up beyond 1 day granularity though in most cases 1 day should be sufficent.
 
 for supervisor in supervisorSpecInfo.keys():
     currentSupervisor = supervisorSpecInfo[supervisor];
@@ -296,6 +317,7 @@ for supervisor in supervisorSpecInfo.keys():
                         runningDates = runningDate.split('/');
                         if len(runningDates) is not 2:
                             print("Found interval({0}) for {1} that is improperly formatted".format(currentSupervisor["dataSource"], runningDate));
+                            zk.stop();
                             exit(-1);
                         runningTaskStartDateTime = isodate.parse_datetime(runningDates[0]);
                         runningTaskEndDateTime = isodate.parse_datetime(runningDates[1]);
@@ -322,3 +344,6 @@ for supervisor in supervisorSpecInfo.keys():
                 submitPayLoadToDruid(druidRouters.split(','), "/druid/indexer/v1/task", taskSpec);
                 print("Submitted rollup for {0}({1})".format(currentSupervisor["dataSource"], dayToSubmit));
         currentEndDateTime = currentStartDateTime;
+
+zk.stop();
+exit(0);
