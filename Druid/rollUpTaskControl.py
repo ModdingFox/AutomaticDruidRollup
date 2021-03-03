@@ -4,6 +4,7 @@ import getopt, sys, os
 import json
 import getDruidEnvironment
 import Find_Druid
+import Fetch_Druid_Rules
 import requests
 import re
 import datetime
@@ -11,12 +12,16 @@ import isodate
 
 druidConfigPath = None;
 druidSelectedEnvironment = None;
-druidRollUpRules = None;
 
 zookeeper = None;
 rootZNode = None;
+configRootZNode = None;
 
 druidRouters = None;
+
+validGranularities = { "NONE": None, "SECOND": 86400, "MINUTE": 1440, "FIVE_MINUTE": 240, "TEN_MINUTE": 144, "FIFTEEN_MINUTE": 96, "THIRTY_MINUTE": 48, "HOUR": 24, "SIX_HOUR": 4, "DAY": 1};
+
+rules = {};
 
 def getTaskTemplate():
     taskTemplate = {};
@@ -54,37 +59,38 @@ def Print_Command_Help( ):
     print("Usage:");
     print("--druidConfigPath=\"/etc/Druid/druidEnvironment.json\" - Path to drud environments config");
     print("--druidSelectedEnvironment=\"Azure\" - Environment name to load configs for");
-    print("--druidRollUpRules=\"/etc/Druid/rollUpRules.json\" - Path to druid rollup rule config");
     print("--zookeeper=\"192.168.1.100:2181,192.168.1.101:2181,192.168.1.102:2181\" - Used with rootZNode and targetProtocol to discover brokers");
     print("--rootZNode=\"/brokers\" - Root ZNode for brokers");
+    print("--configRootZNode=\"/druidRollUpRules\" - Root Z Node for data source rules");
 
 def Load_EnvVars():
     global druidConfigPath;
     global druidSelectedEnvironment;
-    global druidRollUpRules;
     global zookeeper;
     global rootZNode;
+    global configRootZNode;
     
     druidConfigPath = os.getenv('druidConfigPath');
     druidSelectedEnvironment = os.getenv('druidSelectedEnvironment');
-    druidRollUpRules = os.getenv('druidRollUpRules');
     zookeeper = os.getenv('zookeeper');
     rootZNode = os.getenv('rootZNode');
+    configRootZNode = os.getenv('configRootZNode');
     return;
 
 def Load_Agrs():
     global druidConfigPath;
     global druidSelectedEnvironment;
-    global druidRollUpRules;
     global zookeeper;
     global rootZNode;
     global druidRouters;
+    global configRootZNode;
+    global rules;
     
     fullCmdArguments = sys.argv;
     argumentList = fullCmdArguments[1:];
     
     unixOptions = "ho:v";
-    Command_Line_Options = [ "druidConfigPath=", "druidSelectedEnvironment=", "druidRollUpRules=", "zookeeper=", "rootZNode=" ];
+    Command_Line_Options = [ "druidConfigPath=", "druidSelectedEnvironment=", "zookeeper=", "rootZNode=", "configRootZNode=" ];
     
     try:
         arguments, values = getopt.getopt(argumentList, unixOptions, Command_Line_Options);
@@ -97,25 +103,34 @@ def Load_Agrs():
             druidConfigPath=currentValue;
         elif currentArgument in ("--druidSelectedEnvironment"):
             druidSelectedEnvironment=currentValue;
-        elif currentArgument in ("--druidRollUpRules"):
-            druidRollUpRules=currentValue;
         elif currentArgument in ("--zookeeper"):
             zookeeper=currentValue;
         elif currentArgument in ("--rootZNode"):
             rootZNode=currentValue;
+        elif currentArgument in ("--configRootZNode"):
+            configRootZNode=currentValue;
     
     if druidConfigPath is not None and druidSelectedEnvironment is not None:
-        zookeeper, rootZNode = getDruidEnvironment.loadEnvironment(druidConfigPath, druidSelectedEnvironment);
+        zookeeperReturn, rootZNodeReturn, configRootZNodeReturn = getDruidEnvironment.loadEnvironment(druidConfigPath, druidSelectedEnvironment);
+        if zookeeperReturn is not None:
+            zookeeper = zookeeperReturn;
+        if rootZNodeReturn is not None:
+            rootZNode = rootZNodeReturn;
+        if configRootZNodeReturn is not None:
+            configRootZNode = configRootZNodeReturn;
     
     if zookeeper is not None and rootZNode is not None:
        druidRouters = Find_Druid.Get_Druid_Config(zookeeper, rootZNode, "druid", "router");
+
+    if zookeeper is not None and configRootZNode is not None:
+        rules = Fetch_Druid_Rules.getRollupRules(zookeeper, configRootZNode);
     
     if druidRouters is None:
         print("druid not valid ensure that either druidConfigPath and druidSelectedEnvironment or zookeeper and rootZNode are set correctly");
         Print_Command_Help();
         sys.exit(-1);
-    elif druidRollUpRules is None:
-        print("druidRollUpRules must be set");
+    elif len(rules.keys()) == 0:
+        print("Rules empty. Ensure that zookeeper it up, the configRootZNode is correct, and that at least the \"_default\" znode exists");
         Print_Command_Help();
         sys.exit(-1);
 
@@ -159,8 +174,26 @@ def getSegmentCountsByDayInInterval(DRUID_TARGET_HOSTS, dataSource, startTime, e
             exit(-1);
     return result;
 
+def validateRollupRules(dataSource, rules, validGranularities):
+    for rule in rules:
+        if "Period" in rule.keys() and "segmentGranularity" in rule.keys() and "queryGranularity" in rule.keys():
+            if rule["segmentGranularity"] in validGranularities.keys() and rule["queryGranularity"] in validGranularities.keys():
+                m = re.search('^P\d+[M|D|Y]$', rule["Period"])
+                if m is None:
+                    print("Invalid Period of {0}".format(rule["Period"]));
+                    exit(-1)
+            else:
+                print("segmentGranularity and queryGranularity must be one of {0}".format(",".join(validGranularities)));
+                exit(-1);
+        else:
+            print("All rules must contain Period, segmentGranularity, and queryGranularity");
+            exit(-1);
+
 Load_EnvVars();
 Load_Agrs();
+
+for rule in rules.keys():
+    validateRollupRules(rule, rules[rule], validGranularities);
 
 supervisors = submitGetToDruid(druidRouters.split(','), "/druid/indexer/v1/supervisor?full");
 if supervisors is False:
@@ -231,44 +264,25 @@ for task in taskInfo.keys():
         print("Task payload with missing data found");
         exit(-1);
 
-rules = [];
+#Rules are evaluated top down and execute based on first match for each interval. The rules uses the segmentGranularity to determine if a rollup should be ran for each day in the interval its checking.
 
-try:
-    rulesFile = open(druidRollUpRules, 'r');
-    rules = json.load(rulesFile);
-except Exception as e:
-    print("Error loading rules file: {0}".format(e))
-    exit(-1);
-
-validGranularities = { "NONE": None, "SECOND": 86400, "MINUTE": 1440, "FIFTEEN_MINUTE": 96, "THIRTY_MINUTE": 48, "HOUR": 24, "DAY": 1};
-
-for rule in rules:
-    if "Period" in rule.keys() and "segmentGranularity" in rule.keys() and "queryGranularity" in rule.keys():
-        if rule["segmentGranularity"] in validGranularities.keys() and rule["queryGranularity"] in validGranularities.keys():
-            m = re.search('^P\d+[M|D|Y]$', rule["Period"])
-            if m is None:
-                print("Invalid Period of {0}".format(rule["Period"]));
-                exit(-1)
-        else:
-            print("segmentGranularity and queryGranularity must be one of {0}".format(",".join(validGranularities)));
-            exit(-1);
-    else:
-        print("All rules must contain Period, segmentGranularity, and queryGranularity");
-        exit(-1);
-
-#Rules are evaluated top down and execute based on first match for each interval. The rules uses the segmentGranularity to determine if a rollup should be ran for each day in the interval its checking. Valid segmentGranularity options are NONE, SECOND, MINUTE, FIFTEEN_MINUTE, THIRTY_MINUTE, HOUR, DAY. This limits the ability to roll data up beyond 1 day granularity though in most cases 1 day should be sufficent.
-
-currentEndDateTime = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0);
-lastDuration = isodate.parse_duration("P0D");
-
-for rule in rules:
-    print("Running {0} with segmentGranularity: {1} and queryGranularity: {2}".format(rule["Period"], rule["segmentGranularity"], rule["queryGranularity"]));
-    currentDuration = isodate.parse_duration(rule["Period"]);
-    currentStartDateTime = currentEndDateTime - (currentDuration - lastDuration);
-    lastDuration = currentDuration;
-    if validGranularities[rule["segmentGranularity"]] is not None:
-        for supervisor in supervisorSpecInfo.keys():
-            segmentCounts = getSegmentCountsByDayInInterval(druidRouters.split(','), supervisorSpecInfo[supervisor]["dataSource"], currentStartDateTime.strftime("%Y-%m-%d"), currentEndDateTime.strftime("%Y-%m-%d"));
+for supervisor in supervisorSpecInfo.keys():
+    currentSupervisor = supervisorSpecInfo[supervisor];
+    currentRules = rules["_default"];
+    
+    if currentSupervisor["dataSource"] in rules.keys() and len(rules[currentSupervisor["dataSource"]]) > 0:
+        currentRules = rules[currentSupervisor["dataSource"]]
+    
+    currentEndDateTime = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0);
+    lastDuration = isodate.parse_duration("P0D");
+    
+    for rule in currentRules:
+        print("{0}: Running {1} with segmentGranularity: {2} and queryGranularity: {3}".format(currentSupervisor["dataSource"], rule["Period"], rule["segmentGranularity"], rule["queryGranularity"]));
+        currentDuration = isodate.parse_duration(rule["Period"]);
+        currentStartDateTime = currentEndDateTime - (currentDuration - lastDuration);
+        lastDuration = currentDuration;
+        if validGranularities[rule["segmentGranularity"]] is not None:
+            segmentCounts = getSegmentCountsByDayInInterval(druidRouters.split(','), currentSupervisor["dataSource"], currentStartDateTime.strftime("%Y-%m-%d"), currentEndDateTime.strftime("%Y-%m-%d"));
             daysMeetingRollRuleReq = [];
             for segmentDate in segmentCounts.keys():
                 if segmentCounts[segmentDate] > validGranularities[rule["segmentGranularity"]]:
@@ -277,16 +291,16 @@ for rule in rules:
             for dayMeetingRollRuleReq in daysMeetingRollRuleReq:
                 dayMeetingRollRuleReqDate = isodate.parse_datetime(dayMeetingRollRuleReq + "T00:00:00Z");
                 hasRunningTask = False;
-                if supervisorSpecInfo[supervisor]["dataSource"] in runningIntervalList.keys():
-                    for runningDate in runningIntervalList[supervisorSpecInfo[supervisor]["dataSource"]]:
+                if currentSupervisor["dataSource"] in runningIntervalList.keys():
+                    for runningDate in runningIntervalList[currentSupervisor["dataSource"]]:
                         runningDates = runningDate.split('/');
                         if len(runningDates) is not 2:
-                            print("Found interval({0}) for {1} that is improperly formatted".format(supervisorSpecInfo[supervisor]["dataSource"], runningDate));
+                            print("Found interval({0}) for {1} that is improperly formatted".format(currentSupervisor["dataSource"], runningDate));
                             exit(-1);
                         runningTaskStartDateTime = isodate.parse_datetime(runningDates[0]);
                         runningTaskEndDateTime = isodate.parse_datetime(runningDates[1]);
                         if dayMeetingRollRuleReqDate >= runningTaskStartDateTime and dayMeetingRollRuleReqDate <= runningTaskEndDateTime:
-                            print("{0} already has a running task for {1}".format(supervisorSpecInfo[supervisor]["dataSource"], dayMeetingRollRuleReq));
+                            print("{0} already has a running task for {1}".format(currentSupervisor["dataSource"], dayMeetingRollRuleReq));
                             hasRunningTask = True;
                             break;
                 if hasRunningTask is False:
@@ -296,15 +310,15 @@ for rule in rules:
                 intervalEndDate = intervalStartDate + isodate.parse_duration("P1D");
                 intervalString = intervalStartDate.strftime("%Y-%m-%dT%H:%M:%S") + "/" + intervalEndDate.strftime("%Y-%m-%dT%H:%M:%S");
                 taskSpec = getTaskTemplate();
-                taskSpec["spec"]["ioConfig"]["inputSource"]["dataSource"] = supervisorSpecInfo[supervisor]["dataSource"];
+                taskSpec["spec"]["ioConfig"]["inputSource"]["dataSource"] = currentSupervisor["dataSource"];
                 taskSpec["spec"]["ioConfig"]["inputSource"]["interval"] = intervalString;
-                taskSpec["spec"]["dataSchema"]["dataSource"] = supervisorSpecInfo[supervisor]["dataSource"];
+                taskSpec["spec"]["dataSchema"]["dataSource"] = currentSupervisor["dataSource"];
                 taskSpec["spec"]["dataSchema"]["granularitySpec"]["queryGranularity"] = rule["queryGranularity"];
                 taskSpec["spec"]["dataSchema"]["granularitySpec"]["segmentGranularity"] = rule["segmentGranularity"];
                 taskSpec["spec"]["dataSchema"]["granularitySpec"]["intervals"] = [ intervalString ];
-                taskSpec["spec"]["dataSchema"]["timestampSpec"] = supervisorSpecInfo[supervisor]["timestampSpec"];
-                taskSpec["spec"]["dataSchema"]["dimensionsSpec"]["dimensions"] = supervisorSpecInfo[supervisor]["dimensions"];
-                taskSpec["spec"]["dataSchema"]["metricsSpec"] = supervisorSpecInfo[supervisor]["metricsSpec"];
+                taskSpec["spec"]["dataSchema"]["timestampSpec"] = currentSupervisor["timestampSpec"];
+                taskSpec["spec"]["dataSchema"]["dimensionsSpec"]["dimensions"] = currentSupervisor["dimensions"];
+                taskSpec["spec"]["dataSchema"]["metricsSpec"] = currentSupervisor["metricsSpec"];
                 submitPayLoadToDruid(druidRouters.split(','), "/druid/indexer/v1/task", taskSpec);
-                print("Submitted rollup for {0}({1})".format(supervisorSpecInfo[supervisor]["dataSource"], dayToSubmit));
-    currentEndDateTime = currentStartDateTime;
+                print("Submitted rollup for {0}({1})".format(currentSupervisor["dataSource"], dayToSubmit));
+        currentEndDateTime = currentStartDateTime;

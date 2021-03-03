@@ -4,6 +4,7 @@ import json;
 def loadEnvironment(filePath, environmentName):
     zookeeper = None;
     rootZNode = None;
+    configRootZNode = None;
     
     environmentFile = open(filePath, 'r');
     jsonData = json.load(environmentFile);
@@ -12,17 +13,14 @@ def loadEnvironment(filePath, environmentName):
         selectedEnvironment = jsonData[environmentName];
         if 'Zookeeper' in selectedEnvironment.keys():
             zookeeper = selectedEnvironment['Zookeeper'];
-        else:
-            print("Missing key {0} in environment config".format('Zookeeper'));
-            exit(-1);
          
         if 'RootZNode' in selectedEnvironment.keys():
             rootZNode = selectedEnvironment['RootZNode'];
-        else:
-            print("Missing key {0} in environment config".format('RootZNode'));
-            exit(-1);     
+        
+        if 'ConfigRootZNode' in selectedEnvironment.keys():
+            configRootZNode = selectedEnvironment['ConfigRootZNode'];
     else:
         print("Error could not find an environment named {0}".format(environmentName));
         exit(-1);
     
-    return zookeeper, rootZNode
+    return zookeeper, rootZNode, configRootZNode

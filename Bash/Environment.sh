@@ -2,7 +2,7 @@
 
 shopt -s expand_aliases
 
-export EnvironmentRoot="/home/e0180009/Desktop/DR/DruidRollup/AutomaticDruidRollup"
+export EnvironmentRoot=""
 export PYTHONPATH="${EnvironmentRoot}/Environment:${EnvironmentRoot}/Zookeeper"
 export druidConfigPath="${EnvironmentRoot}/Environment/druidEnvironment.json"
 
